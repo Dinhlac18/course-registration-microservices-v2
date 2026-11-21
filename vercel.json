@@ -22,8 +22,11 @@
     }
   },
   "rewrites": [
+    { "source": "/api/students", "destination": { "service": "student_service" } },
     { "source": "/api/students/(.*)", "destination": { "service": "student_service" } },
+    { "source": "/api/courses", "destination": { "service": "course_service" } },
     { "source": "/api/courses/(.*)", "destination": { "service": "course_service" } },
+    { "source": "/api/registrations", "destination": { "service": "registration_service" } },
     { "source": "/api/registrations/(.*)", "destination": { "service": "registration_service" } },
     { "source": "/(.*)", "destination": { "service": "frontend" } }
   ]

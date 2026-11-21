@@ -1,6 +1,5 @@
 import os
 import sqlite3
-from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -106,24 +105,31 @@ def health():
     return {"service": "student-service", "status": "ok"}
 
 
+# Đặt route danh sách trước route động /{student_code} để không bị nhận nhầm "students" là mã SV
 @app.get("/students")
+@app.get("/students/")
 @app.get("/api/students")
 @app.get("/api/students/")
+@app.get("/api/students/students")
+@app.get("/api/students/students/")
 def list_students():
     return _list_students()
+
+
+@app.post("/students", status_code=201)
+@app.post("/students/", status_code=201)
+@app.post("/api/students", status_code=201)
+@app.post("/api/students/", status_code=201)
+@app.post("/api/students/students", status_code=201)
+@app.post("/api/students/students/", status_code=201)
+def create_student(data: StudentCreate):
+    return _create_student(data)
 
 
 @app.get("/students/{student_code}")
 @app.get("/api/students/{student_code}")
 def get_student(student_code: str):
     return _get_student(student_code)
-
-
-@app.post("/students", status_code=201)
-@app.post("/api/students", status_code=201)
-@app.post("/api/students/", status_code=201)
-def create_student(data: StudentCreate):
-    return _create_student(data)
 
 
 @app.delete("/students/{student_code}")
