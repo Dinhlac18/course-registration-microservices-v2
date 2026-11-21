@@ -1,8 +1,7 @@
 import os
 import sqlite3
 from typing import Optional
-import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -15,8 +14,8 @@ app.add_middleware(
 )
 
 DB_PATH = "/tmp/registrations.db" if os.getenv("VERCEL") else "registrations.db"
-STUDENT_SERVICE_URL = os.getenv("STUDENT_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
-COURSE_SERVICE_URL = os.getenv("COURSE_SERVICE_URL", "http://127.0.0.1:8002").rstrip("/")
+STUDENT_SERVICE_URL = os.getenv("STUDENT_SERVICE_URL", "")
+COURSE_SERVICE_URL = os.getenv("COURSE_SERVICE_URL", "")
 
 
 def get_db():
@@ -32,11 +31,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS registrations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_code TEXT NOT NULL,
-                section_id INTEGER NOT NULL,
-                course_code TEXT NOT NULL,
-                course_name TEXT NOT NULL,
-                schedule TEXT NOT NULL,
-                UNIQUE(student_code, section_id)
+                section_code TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'REGISTERED',
+                UNIQUE(student_code, section_code)
             )
             """
         )
@@ -47,125 +44,121 @@ init_db()
 
 class RegistrationCreate(BaseModel):
     student_code: str
-    section_id: int
+    section_code: str
+    status: Optional[str] = "REGISTERED"
+
+
+class RegistrationUpdate(BaseModel):
+    status: str
 
 
 def _list_registrations(student_code: Optional[str] = None):
     with get_db() as conn:
-        if student_code:
+        if student_code and student_code.strip():
             rows = conn.execute(
-                "SELECT * FROM registrations WHERE student_code = ? ORDER BY id ASC",
+                "SELECT * FROM registrations WHERE student_code = ? ORDER BY id DESC",
                 (student_code.strip(),),
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM registrations ORDER BY id ASC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM registrations ORDER BY id DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
 
 def _create_registration(data: RegistrationCreate):
     student_code = data.student_code.strip()
-    section_id = data.section_id
-    if not student_code:
-        raise HTTPException(status_code=400, detail="Thiếu mã sinh viên")
-
-    with get_db() as conn:
-        dup = conn.execute(
-            "SELECT id FROM registrations WHERE student_code = ? AND section_id = ?",
-            (student_code, section_id),
-        ).fetchone()
-        if dup:
-            raise HTTPException(status_code=400, detail="Sinh viên đã đăng ký lớp học phần này")
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            st_resp = client.get(f"{STUDENT_SERVICE_URL}/students/{student_code}")
-            if st_resp.status_code == 404:
-                raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên")
-            st_resp.raise_for_status()
-
-            sec_resp = client.get(f"{COURSE_SERVICE_URL}/sections/{section_id}")
-            if sec_resp.status_code == 404:
-                raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
-            sec_resp.raise_for_status()
-            section = sec_resp.json()
-
-            if section["enrolled_slots"] >= section["max_slots"]:
-                raise HTTPException(status_code=400, detail="Lớp học phần đã hết chỗ")
-
-            slot_resp = client.patch(
-                f"{COURSE_SERVICE_URL}/sections/{section_id}/slot",
-                json={"delta": 1},
-            )
-            if slot_resp.status_code >= 400:
-                detail = slot_resp.json().get("detail", "Không thể cập nhật sĩ số")
-                raise HTTPException(status_code=slot_resp.status_code, detail=detail)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Lỗi kết nối service nội bộ: {exc}")
+    section_code = data.section_code.strip()
+    status = (data.status or "REGISTERED").strip()
+    if not student_code or not section_code:
+        raise HTTPException(
+            status_code=400, detail="Vui lòng nhập mã sinh viên và mã lớp học phần"
+        )
 
     with get_db() as conn:
         try:
             cur = conn.execute(
                 """
-                INSERT INTO registrations (student_code, section_id, course_code, course_name, schedule)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO registrations (student_code, section_code, status)
+                VALUES (?, ?, ?)
                 """,
-                (
-                    student_code,
-                    section_id,
-                    section["course_code"],
-                    section["course_name"],
-                    section["schedule"],
-                ),
+                (student_code, section_code, status),
             )
             row = conn.execute(
                 "SELECT * FROM registrations WHERE id = ?", (cur.lastrowid,)
             ).fetchone()
             return dict(row)
         except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Sinh viên đã đăng ký lớp học phần này")
+            raise HTTPException(
+                status_code=400, detail="Sinh viên đã đăng ký lớp học phần này"
+            )
+
+
+def _update_registration(reg_id: int, data: RegistrationUpdate):
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE registrations SET status = ? WHERE id = ?",
+            (data.status.strip(), reg_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Không tìm thấy lượt đăng ký")
+        row = conn.execute(
+            "SELECT * FROM registrations WHERE id = ?", (reg_id,)
+        ).fetchone()
+        return dict(row)
 
 
 def _delete_registration(reg_id: int):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM registrations WHERE id = ?", (reg_id,)).fetchone()
-        if not row:
+        cur = conn.execute("DELETE FROM registrations WHERE id = ?", (reg_id,))
+        if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Không tìm thấy lượt đăng ký")
-
-        section_id = row["section_id"]
-        conn.execute("DELETE FROM registrations WHERE id = ?", (reg_id,))
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            client.patch(f"{COURSE_SERVICE_URL}/sections/{section_id}/slot", json={"delta": -1})
-    except Exception:
-        pass
-
-    return {"deleted": True, "id": reg_id}
+        return {"deleted": True, "id": reg_id}
 
 
 @app.get("/health")
 @app.get("/api/registrations/health")
 def health():
-    return {"service": "registration-service", "status": "ok"}
+    return {
+        "service": "registration-service",
+        "status": "ok",
+        "student_service_configured": bool(STUDENT_SERVICE_URL),
+        "course_service_configured": bool(COURSE_SERVICE_URL),
+    }
 
 
 @app.get("/registrations")
+@app.get("/registrations/")
 @app.get("/api/registrations")
 @app.get("/api/registrations/")
-def list_registrations(student_code: Optional[str] = None):
+@app.get("/api/registrations/registrations")
+@app.get("/api/registrations/registrations/")
+def list_registrations(student_code: Optional[str] = Query(default=None)):
     return _list_registrations(student_code)
 
 
 @app.post("/registrations", status_code=201)
+@app.post("/registrations/", status_code=201)
 @app.post("/api/registrations", status_code=201)
 @app.post("/api/registrations/", status_code=201)
+@app.post("/api/registrations/registrations", status_code=201)
+@app.post("/api/registrations/registrations/", status_code=201)
 def create_registration(data: RegistrationCreate):
     return _create_registration(data)
 
 
+@app.put("/registrations/{reg_id}")
+@app.put("/api/registrations/{reg_id}")
+@app.put("/api/registrations/registrations/{reg_id}")
+@app.patch("/registrations/{reg_id}")
+@app.patch("/api/registrations/{reg_id}")
+@app.patch("/api/registrations/registrations/{reg_id}")
+def update_registration(reg_id: int, data: RegistrationUpdate):
+    return _update_registration(reg_id, data)
+
+
 @app.delete("/registrations/{reg_id}")
 @app.delete("/api/registrations/{reg_id}")
+@app.delete("/api/registrations/registrations/{reg_id}")
 def delete_registration(reg_id: int):
     return _delete_registration(reg_id)
