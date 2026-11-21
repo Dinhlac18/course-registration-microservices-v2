@@ -52,6 +52,11 @@ class StudentCreate(BaseModel):
     major: str
 
 
+class StudentUpdate(BaseModel):
+    full_name: str
+    major: str
+
+
 def _list_students():
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM students ORDER BY id ASC").fetchall()
@@ -74,7 +79,9 @@ def _create_student(data: StudentCreate):
     name = data.full_name.strip()
     major = data.major.strip()
     if not code or not name or not major:
-        raise HTTPException(status_code=400, detail="Vui lòng nhập đầy đủ mã SV, họ tên và ngành học")
+        raise HTTPException(
+            status_code=400, detail="Vui lòng nhập đầy đủ mã SV, họ tên và ngành học"
+        )
 
     with get_db() as conn:
         try:
@@ -88,6 +95,28 @@ def _create_student(data: StudentCreate):
             return dict(row)
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="Mã sinh viên đã tồn tại")
+
+
+def _update_student(student_code: str, data: StudentUpdate):
+    code = student_code.strip()
+    name = data.full_name.strip()
+    major = data.major.strip()
+    if not name or not major:
+        raise HTTPException(
+            status_code=400, detail="Vui lòng nhập đầy đủ họ tên và ngành học"
+        )
+
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE students SET full_name = ?, major = ? WHERE student_code = ?",
+            (name, major, code),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên")
+        row = conn.execute(
+            "SELECT * FROM students WHERE student_code = ?", (code,)
+        ).fetchone()
+        return dict(row)
 
 
 def _delete_student(student_code: str):
@@ -105,7 +134,6 @@ def health():
     return {"service": "student-service", "status": "ok"}
 
 
-# Đặt route danh sách trước route động /{student_code} để không bị nhận nhầm "students" là mã SV
 @app.get("/students")
 @app.get("/students/")
 @app.get("/api/students")
@@ -128,11 +156,23 @@ def create_student(data: StudentCreate):
 
 @app.get("/students/{student_code}")
 @app.get("/api/students/{student_code}")
+@app.get("/api/students/students/{student_code}")
 def get_student(student_code: str):
     return _get_student(student_code)
 
 
+@app.put("/students/{student_code}")
+@app.put("/api/students/{student_code}")
+@app.put("/api/students/students/{student_code}")
+@app.patch("/students/{student_code}")
+@app.patch("/api/students/{student_code}")
+@app.patch("/api/students/students/{student_code}")
+def update_student(student_code: str, data: StudentUpdate):
+    return _update_student(student_code, data)
+
+
 @app.delete("/students/{student_code}")
 @app.delete("/api/students/{student_code}")
+@app.delete("/api/students/students/{student_code}")
 def delete_student(student_code: str):
     return _delete_student(student_code)
