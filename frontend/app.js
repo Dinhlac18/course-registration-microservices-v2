@@ -54,6 +54,8 @@ document.getElementById("studentUrl").value = DEFAULT_URLS.student;
 document.getElementById("courseUrl").value = DEFAULT_URLS.course;
 document.getElementById("regUrl").value = DEFAULT_URLS.reg;
 
+let latestSections = [];
+
 function getUrls() {
   return {
     student: document.getElementById("studentUrl").value.trim().replace(/\/+$/, ""),
@@ -204,6 +206,7 @@ async function loadAll() {
     ]);
     const allStudents = await allStudentsRes.json();
     const sections = await secRes.json();
+    latestSections = Array.isArray(sections) ? sections : [];
 
     const code = getActiveStudentCode();
     const validStudent = allStudents.find((s) => s.student_code === code);
@@ -218,15 +221,15 @@ async function loadAll() {
     syncScreenVisibility();
 
     if (!currentCode) {
-      renderSections(sections, new Set(), "");
-      renderRegistrations([]);
+      renderSections(latestSections, new Set(), "");
+      renderRegistrations([], latestSections);
       return;
     }
 
     const stRes = await fetch(`${urls.student}/students/${encodeURIComponent(currentCode)}`);
     if (!stRes.ok) {
-      renderSections(sections, new Set(), currentCode);
-      renderRegistrations([]);
+      renderSections(latestSections, new Set(), currentCode);
+      renderRegistrations([], latestSections);
       return;
     }
 
@@ -237,10 +240,11 @@ async function loadAll() {
 
     const regRes = await fetch(`${urls.reg}/registrations?student_code=${encodeURIComponent(currentCode)}`);
     const regs = await regRes.json();
-    const registeredSectionIds = new Set(regs.map((r) => r.section_id));
+    const regList = Array.isArray(regs) ? regs : [];
+    const registeredSectionIds = new Set(regList.map((r) => r.section_id));
 
-    renderSections(sections, registeredSectionIds, currentCode);
-    renderRegistrations(regs);
+    renderSections(latestSections, registeredSectionIds, currentCode);
+    renderRegistrations(regList, latestSections);
   } catch {
     setMessage("Không kết nối được tới backend service. Kiểm tra URL hoặc trạng thái server.", true);
   }
@@ -438,21 +442,48 @@ function renderSections(sections, registeredIds, studentCode) {
   });
 }
 
-function renderRegistrations(regs) {
+function renderRegistrations(regs, sections = latestSections) {
   const tbody = document.getElementById("regsBody");
   tbody.innerHTML = "";
 
-  if (!regs.length) {
+  if (!Array.isArray(regs) || !regs.length) {
     tbody.innerHTML = `<tr><td colspan="4">Chưa đăng ký học phần nào.</td></tr>`;
     return;
   }
 
   regs.forEach((r) => {
+    const matched =
+      sections.find((s) => {
+        if (
+          r.section_id !== undefined &&
+          r.section_id !== null &&
+          String(s.id) === String(r.section_id)
+        ) {
+          return true;
+        }
+        if (
+          r.section_code &&
+          (String(s.section_code || "") === String(r.section_code) ||
+            String(s.course_code || "") === String(r.section_code))
+        ) {
+          return true;
+        }
+        return false;
+      }) || {};
+
+    const courseCode =
+      r.course_code ||
+      matched.course_code ||
+      r.section_code ||
+      (r.section_id ? `#${r.section_id}` : "—");
+    const courseName = r.course_name || matched.course_name || "Chưa cập nhật";
+    const schedule = r.schedule || matched.schedule || "—";
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${r.course_code}</td>
-      <td>${r.course_name}</td>
-      <td>${r.schedule}</td>
+      <td>${courseCode}</td>
+      <td>${courseName}</td>
+      <td>${schedule}</td>
       <td><button class="danger" onclick="cancelRegistration(${r.id})">Hủy</button></td>
     `;
     tbody.appendChild(tr);
