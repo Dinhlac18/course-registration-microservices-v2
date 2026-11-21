@@ -3,7 +3,7 @@ import sqlite3
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 app = FastAPI(title="Registration Service")
 app.add_middleware(
@@ -47,6 +47,22 @@ class RegistrationCreate(BaseModel):
     section_code: str
     status: Optional[str] = "REGISTERED"
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data):
+        if isinstance(data, dict):
+            if not data.get("section_code"):
+                data["section_code"] = (
+                    data.get("course_code")
+                    or data.get("class_code")
+                    or data.get("section_id")
+                    or ""
+                )
+            if not data.get("student_code"):
+                raw_student = data.get("student_id")
+                data["student_code"] = str(raw_student) if raw_student is not None else ""
+        return data
+
 
 class RegistrationUpdate(BaseModel):
     status: str
@@ -72,7 +88,7 @@ def _create_registration(data: RegistrationCreate):
     status = (data.status or "REGISTERED").strip()
     if not student_code or not section_code:
         raise HTTPException(
-            status_code=400, detail="Vui lòng nhập mã sinh viên và mã lớp học phần"
+            status_code=422, detail="Vui lòng nhập mã sinh viên và mã lớp học phần"
         )
 
     with get_db() as conn:
