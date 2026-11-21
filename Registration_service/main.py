@@ -32,11 +32,18 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_code TEXT NOT NULL,
                 section_code TEXT NOT NULL,
+                section_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'REGISTERED',
                 UNIQUE(student_code, section_code)
             )
             """
         )
+        # Hỗ trợ bảng cũ nếu đã tồn tại trước khi thêm cột section_id
+        cols = [
+            r["name"] for r in conn.execute("PRAGMA table_info(registrations)").fetchall()
+        ]
+        if "section_id" not in cols:
+            conn.execute("ALTER TABLE registrations ADD COLUMN section_id INTEGER")
 
 
 init_db()
@@ -45,22 +52,41 @@ init_db()
 class RegistrationCreate(BaseModel):
     student_code: str
     section_code: str
+    section_id: Optional[int] = None
     status: Optional[str] = "REGISTERED"
 
     @model_validator(mode="before")
     @classmethod
     def normalize_fields(cls, data):
         if isinstance(data, dict):
-            if not data.get("section_code"):
-                data["section_code"] = (
+            raw_section_id = data.get("section_id")
+            parsed_section_id = None
+            if raw_section_id is not None and str(raw_section_id).strip() != "":
+                try:
+                    parsed_section_id = int(raw_section_id)
+                except (ValueError, TypeError):
+                    parsed_section_id = None
+
+            raw_section = data.get("section_code")
+            if raw_section is None or str(raw_section).strip() == "":
+                raw_section = (
                     data.get("course_code")
                     or data.get("class_code")
-                    or data.get("section_id")
-                    or ""
+                    or (str(parsed_section_id) if parsed_section_id is not None else "")
+                    or (str(raw_section_id) if raw_section_id is not None else "")
                 )
-            if not data.get("student_code"):
+
+            raw_student = data.get("student_code")
+            if raw_student is None or str(raw_student).strip() == "":
                 raw_student = data.get("student_id")
-                data["student_code"] = str(raw_student) if raw_student is not None else ""
+
+            return {
+                **data,
+                "student_code": str(raw_student).strip() if raw_student is not None else "",
+                "section_code": str(raw_section).strip() if raw_section is not None else "",
+                "section_id": parsed_section_id,
+                "status": str(data.get("status") or "REGISTERED").strip(),
+            }
         return data
 
 
@@ -85,7 +111,9 @@ def _list_registrations(student_code: Optional[str] = None):
 def _create_registration(data: RegistrationCreate):
     student_code = data.student_code.strip()
     section_code = data.section_code.strip()
-    status = (data.status or "REGISTERED").strip()
+    section_id = data.section_id
+    status = (data.status or "REGISTERED").strip() or "REGISTERED"
+
     if not student_code or not section_code:
         raise HTTPException(
             status_code=422, detail="Vui lòng nhập mã sinh viên và mã lớp học phần"
@@ -95,10 +123,10 @@ def _create_registration(data: RegistrationCreate):
         try:
             cur = conn.execute(
                 """
-                INSERT INTO registrations (student_code, section_code, status)
-                VALUES (?, ?, ?)
+                INSERT INTO registrations (student_code, section_code, section_id, status)
+                VALUES (?, ?, ?, ?)
                 """,
-                (student_code, section_code, status),
+                (student_code, section_code, section_id, status),
             )
             row = conn.execute(
                 "SELECT * FROM registrations WHERE id = ?", (cur.lastrowid,)
