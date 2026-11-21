@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -27,18 +28,19 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS students (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_code TEXT UNIQUE NOT NULL,
+                student_code TEXT NOT NULL UNIQUE,
                 full_name TEXT NOT NULL,
                 major TEXT NOT NULL
             )
             """
         )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO students (student_code, full_name, major)
-            VALUES ('SV001', 'Nguyễn Văn A', 'Kỹ thuật phần mềm'),
-                   ('SV002', 'Trần Thị B', 'Công nghệ thông tin')
-            """
+        seed_students = [
+            ("SV001", "Nguyễn Văn An", "Công nghệ thông tin"),
+            ("SV002", "Trần Thị Bình", "Kỹ thuật phần mềm"),
+        ]
+        conn.executemany(
+            "INSERT OR IGNORE INTO students (student_code, full_name, major) VALUES (?, ?, ?)",
+            seed_students,
         )
 
 
@@ -51,11 +53,6 @@ class StudentCreate(BaseModel):
     major: str
 
 
-class StudentUpdate(BaseModel):
-    full_name: str
-    major: str
-
-
 def _list_students():
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM students ORDER BY id ASC").fetchall()
@@ -63,9 +60,10 @@ def _list_students():
 
 
 def _get_student(student_code: str):
+    code = student_code.strip()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM students WHERE student_code = ?", (student_code,)
+            "SELECT * FROM students WHERE student_code = ?", (code,)
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên")
@@ -77,7 +75,7 @@ def _create_student(data: StudentCreate):
     name = data.full_name.strip()
     major = data.major.strip()
     if not code or not name or not major:
-        raise HTTPException(status_code=400, detail="Thiếu thông tin sinh viên")
+        raise HTTPException(status_code=400, detail="Vui lòng nhập đầy đủ mã SV, họ tên và ngành học")
 
     with get_db() as conn:
         try:
@@ -85,38 +83,21 @@ def _create_student(data: StudentCreate):
                 "INSERT INTO students (student_code, full_name, major) VALUES (?, ?, ?)",
                 (code, name, major),
             )
-            return {
-                "id": cur.lastrowid,
-                "student_code": code,
-                "full_name": name,
-                "major": major,
-            }
+            row = conn.execute(
+                "SELECT * FROM students WHERE id = ?", (cur.lastrowid,)
+            ).fetchone()
+            return dict(row)
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="Mã sinh viên đã tồn tại")
 
 
-def _update_student(student_code: str, data: StudentUpdate):
+def _delete_student(student_code: str):
     code = student_code.strip()
-    name = data.full_name.strip()
-    major = data.major.strip()
-    if not name or not major:
-        raise HTTPException(status_code=400, detail="Họ tên và ngành học không được để trống")
-
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM students WHERE student_code = ?", (code,)
-        ).fetchone()
-        if not row:
+        cur = conn.execute("DELETE FROM students WHERE student_code = ?", (code,))
+        if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Không tìm thấy sinh viên")
-
-        conn.execute(
-            "UPDATE students SET full_name = ?, major = ? WHERE student_code = ?",
-            (name, major, code),
-        )
-        updated = conn.execute(
-            "SELECT * FROM students WHERE student_code = ?", (code,)
-        ).fetchone()
-        return dict(updated)
+        return {"deleted": True, "student_code": code}
 
 
 @app.get("/health")
@@ -145,7 +126,7 @@ def create_student(data: StudentCreate):
     return _create_student(data)
 
 
-@app.put("/students/{student_code}")
-@app.put("/api/students/{student_code}")
-def update_student(student_code: str, data: StudentUpdate):
-    return _update_student(student_code, data)
+@app.delete("/students/{student_code}")
+@app.delete("/api/students/{student_code}")
+def delete_student(student_code: str):
+    return _delete_student(student_code)
