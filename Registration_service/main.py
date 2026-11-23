@@ -29,23 +29,38 @@ def _get_course_base_url() -> str:
     return "http://127.0.0.1:8002"
 
 
-def _notify_course_service(section_id: Optional[int], action: str):
+def _count_registrations_for_section(conn, section_id: Optional[int]) -> int:
+    if section_id is None:
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM registrations
+        WHERE section_id = ? OR section_code = ?
+        """,
+        (int(section_id), str(section_id)),
+    ).fetchone()
+    return int(row["cnt"] if row else 0)
+
+
+def _sync_exact_enrolled_count(section_id: Optional[int], exact_count: int):
     if section_id is None:
         return
     base = _get_course_base_url().rstrip("/")
-    url = f"{base}/sections/{int(section_id)}/{action}"
-    req = request.Request(url, data=b"", method="POST")
+    url = f"{base}/sections/{int(section_id)}/set-enrolled"
+    payload = json.dumps({"enrolled_slots": max(0, int(exact_count))}).encode("utf-8")
+    req = request.Request(url, data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         with request.urlopen(req, timeout=5) as resp:
             if resp.status >= 400:
                 raise HTTPException(
                     status_code=resp.status,
-                    detail="Không thể cập nhật sĩ số lớp học phần",
+                    detail="Không thể đồng bộ sĩ số lớp học phần",
                 )
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
-        detail = "Không thể cập nhật sĩ số lớp học phần"
+        detail = "Không thể đồng bộ sĩ số lớp học phần"
         try:
             parsed = json.loads(body)
             if isinstance(parsed, dict) and parsed.get("detail"):
@@ -54,7 +69,6 @@ def _notify_course_service(section_id: Optional[int], action: str):
             pass
         raise HTTPException(status_code=exc.code or 400, detail=detail)
     except Exception:
-        # Không chặn luồng chính nếu gọi liên service gặp sự cố mạng tạm thời
         pass
 
 
@@ -170,12 +184,13 @@ def _create_registration(data: RegistrationCreate):
             row = conn.execute(
                 "SELECT * FROM registrations WHERE id = ?", (cur.lastrowid,)
             ).fetchone()
+            exact_count = _count_registrations_for_section(conn, section_id)
         except sqlite3.IntegrityError:
             raise HTTPException(
                 status_code=400, detail="Sinh viên đã đăng ký lớp học phần này"
             )
 
-    _notify_course_service(section_id, "enroll")
+    _sync_exact_enrolled_count(section_id, exact_count)
     return dict(row)
 
 
@@ -209,8 +224,9 @@ def _delete_registration(reg_id: int):
                 section_id = None
 
         conn.execute("DELETE FROM registrations WHERE id = ?", (reg_id,))
+        exact_count = _count_registrations_for_section(conn, section_id)
 
-    _notify_course_service(section_id, "unenroll")
+    _sync_exact_enrolled_count(section_id, exact_count)
     return {"deleted": True, "id": reg_id}
 
 
@@ -223,6 +239,34 @@ def health():
         "student_service_configured": bool(STUDENT_SERVICE_URL),
         "course_service_configured": bool(COURSE_SERVICE_URL),
     }
+
+
+@app.get("/registrations/counts")
+@app.get("/registrations/counts/")
+@app.get("/api/registrations/counts")
+@app.get("/api/registrations/counts/")
+@app.get("/api/registrations/registrations/counts")
+@app.get("/api/registrations/registrations/counts/")
+def registration_counts():
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT section_id, section_code, COUNT(*) AS cnt
+            FROM registrations
+            GROUP BY section_id, section_code
+            """
+        ).fetchall()
+        by_section_id = {}
+        for r in rows:
+            sid = r["section_id"]
+            if sid is None and r["section_code"]:
+                try:
+                    sid = int(str(r["section_code"]).strip())
+                except ValueError:
+                    sid = None
+            if sid is not None:
+                by_section_id[str(sid)] = by_section_id.get(str(sid), 0) + int(r["cnt"])
+        return {"counts": by_section_id}
 
 
 @app.get("/registrations")

@@ -64,11 +64,30 @@ class SectionCreate(BaseModel):
     enrolled_slots: Optional[int] = 0
 
 
+class EnrolledCountUpdate(BaseModel):
+    enrolled_slots: int
+
+
 def _get_section_or_404(conn, section_id: int):
     row = conn.execute("SELECT * FROM sections WHERE id = ?", (section_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
     return dict(row)
+
+
+def _set_enrolled(section_id: int, count: int):
+    with get_db() as conn:
+        sec = _get_section_or_404(conn, section_id)
+        max_slots = int(sec["max_slots"] or 30)
+        safe_count = max(0, min(int(count), max_slots))
+        conn.execute(
+            "UPDATE sections SET enrolled_slots = ? WHERE id = ?",
+            (safe_count, section_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM sections WHERE id = ?", (section_id,)
+        ).fetchone()
+        return dict(updated)
 
 
 def _adjust_slots(section_id: int, delta: int):
@@ -144,6 +163,14 @@ def delete_section(section_id: int):
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Không tìm thấy lớp học phần")
         return {"deleted": True, "id": section_id}
+
+
+@app.post("/sections/{section_id}/set-enrolled")
+@app.post("/sections/{section_id}/set-enrolled/")
+@app.post("/api/courses/sections/{section_id}/set-enrolled")
+@app.post("/api/courses/sections/{section_id}/set-enrolled/")
+def set_enrolled(section_id: int, data: EnrolledCountUpdate):
+    return _set_enrolled(section_id, data.enrolled_slots)
 
 
 @app.post("/sections/{section_id}/enroll")
