@@ -1,6 +1,8 @@
+import json
 import os
 import sqlite3
 from typing import Optional
+from urllib import error, request
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
@@ -14,8 +16,46 @@ app.add_middleware(
 )
 
 DB_PATH = "/tmp/registrations.db" if os.getenv("VERCEL") else "registrations.db"
-STUDENT_SERVICE_URL = os.getenv("STUDENT_SERVICE_URL", "")
-COURSE_SERVICE_URL = os.getenv("COURSE_SERVICE_URL", "")
+STUDENT_SERVICE_URL = os.getenv("STUDENT_SERVICE_URL", "").rstrip("/")
+COURSE_SERVICE_URL = os.getenv("COURSE_SERVICE_URL", "").rstrip("/")
+PUBLIC_BASE_URL = "https://course-registration-microservices-v-navy.vercel.app"
+
+
+def _get_course_base_url() -> str:
+    if COURSE_SERVICE_URL:
+        return COURSE_SERVICE_URL
+    if os.getenv("VERCEL"):
+        return f"{PUBLIC_BASE_URL}/api/courses"
+    return "http://127.0.0.1:8002"
+
+
+def _notify_course_service(section_id: Optional[int], action: str):
+    if section_id is None:
+        return
+    base = _get_course_base_url().rstrip("/")
+    url = f"{base}/sections/{int(section_id)}/{action}"
+    req = request.Request(url, data=b"", method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with request.urlopen(req, timeout=5) as resp:
+            if resp.status >= 400:
+                raise HTTPException(
+                    status_code=resp.status,
+                    detail="Không thể cập nhật sĩ số lớp học phần",
+                )
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        detail = "Không thể cập nhật sĩ số lớp học phần"
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("detail"):
+                detail = parsed["detail"]
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.code or 400, detail=detail)
+    except Exception:
+        # Không chặn luồng chính nếu gọi liên service gặp sự cố mạng tạm thời
+        pass
 
 
 def get_db():
@@ -38,7 +78,6 @@ def init_db():
             )
             """
         )
-        # Hỗ trợ bảng cũ nếu đã tồn tại trước khi thêm cột section_id
         cols = [
             r["name"] for r in conn.execute("PRAGMA table_info(registrations)").fetchall()
         ]
@@ -131,11 +170,13 @@ def _create_registration(data: RegistrationCreate):
             row = conn.execute(
                 "SELECT * FROM registrations WHERE id = ?", (cur.lastrowid,)
             ).fetchone()
-            return dict(row)
         except sqlite3.IntegrityError:
             raise HTTPException(
                 status_code=400, detail="Sinh viên đã đăng ký lớp học phần này"
             )
+
+    _notify_course_service(section_id, "enroll")
+    return dict(row)
 
 
 def _update_registration(reg_id: int, data: RegistrationUpdate):
@@ -154,10 +195,23 @@ def _update_registration(reg_id: int, data: RegistrationUpdate):
 
 def _delete_registration(reg_id: int):
     with get_db() as conn:
-        cur = conn.execute("DELETE FROM registrations WHERE id = ?", (reg_id,))
-        if cur.rowcount == 0:
+        existing = conn.execute(
+            "SELECT * FROM registrations WHERE id = ?", (reg_id,)
+        ).fetchone()
+        if not existing:
             raise HTTPException(status_code=404, detail="Không tìm thấy lượt đăng ký")
-        return {"deleted": True, "id": reg_id}
+
+        section_id = existing["section_id"]
+        if section_id is None and existing["section_code"]:
+            try:
+                section_id = int(str(existing["section_code"]).strip())
+            except ValueError:
+                section_id = None
+
+        conn.execute("DELETE FROM registrations WHERE id = ?", (reg_id,))
+
+    _notify_course_service(section_id, "unenroll")
+    return {"deleted": True, "id": reg_id}
 
 
 @app.get("/health")
